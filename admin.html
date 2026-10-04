@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CMS Saya</title>
+<style>
+:root{--bg:#f5f7fa;--card:#fff;--ink:#14202e;--mute:#5d6b7c;--line:#d5dbe3;--acc:#1f5eff;--bad:#c62828;--ok:#1b7f3b}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1620;--card:#18222f;--ink:#e8edf3;--mute:#93a1b2;--line:#2b3846;--acc:#6b95ff;--bad:#ef7b7b;--ok:#5fd38a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:720px;margin:0 auto;padding:16px}
+h1{font-size:1.4rem;margin:8px 0 16px}
+h2{font-size:1.05rem;margin:0 0 10px}
+section,details{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px}
+summary{cursor:pointer;font-weight:600}
+label{display:block;font-size:.9rem;color:var(--mute);margin:10px 0 4px}
+input,textarea{width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:inherit}
+textarea{min-height:260px;resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.92rem}
+input:focus,textarea:focus,button:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+button{padding:10px 16px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink);font:inherit;cursor:pointer}
+button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+button.del{color:var(--bad)}
+button:disabled{opacity:.5}
+ul{list-style:none;margin:0;padding:0}
+li{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 0;border-top:1px solid var(--line)}
+li:first-child{border-top:0}
+li span{overflow-wrap:anywhere}
+#msg{min-height:1.4em;margin:0 0 10px;font-size:.95rem}
+.err{color:var(--bad)}.ok{color:var(--ok)}
+.empty{color:var(--mute)}
+</style>
+</head>
+<body>
+<main>
+<h1>CMS Saya</h1>
+<p id="msg" role="status"></p>
+
+<details id="setup">
+<summary>Pengaturan GitHub</summary>
+<label for="owner">Pemilik repo</label><input id="owner" autocomplete="off">
+<label for="repo">Nama repo</label><input id="repo" autocomplete="off">
+<label for="branch">Branch</label><input id="branch" autocomplete="off">
+<label for="dir">Folder artikel</label><input id="dir" autocomplete="off">
+<label for="token">Personal Access Token</label><input id="token" type="password" autocomplete="off" placeholder="ghp_...">
+<div class="row"><button class="pri" id="saveCfg">Simpan pengaturan</button></div>
+</details>
+
+<section>
+<h2>Artikel</h2>
+<ul id="list"></ul>
+<div class="row"><button id="reload">Muat ulang</button><button class="pri" id="newPost">Artikel baru</button></div>
+</section>
+
+<section id="editor" hidden>
+<h2 id="edTitle">Artikel baru</h2>
+<label for="title">Judul</label><input id="title">
+<label for="date">Tanggal</label><input id="date" type="date">
+<label for="slug">Slug (nama file)</label><input id="slug" autocomplete="off">
+<label for="body">Isi (Markdown)</label><textarea id="body"></textarea>
+<div class="row">
+<button class="pri" id="publish">Publish</button>
+<button id="cancel">Batal</button>
+<button class="del" id="remove" hidden>Hapus artikel</button>
+</div>
+</section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const DEF = {owner:"korob874-coder", repo:"cms-saya", branch:"main", dir:"content/posts", token:""};
+const KEYS = Object.keys(DEF);
+let cur = null; // {path, sha}
+
+function cfg(){
+  let s = {};
+  try { s = JSON.parse(localStorage.getItem("cms-cfg") || "{}"); } catch(e){}
+  return {...DEF, ...s};
+}
+function say(t, cls){ const m = $("#msg"); m.textContent = t; m.className = cls || ""; }
+
+function b64enc(s){
+  const b = new TextEncoder().encode(s); let r = "";
+  b.forEach(x => r += String.fromCharCode(x));
+  return btoa(r);
+}
+function b64dec(s){
+  const r = atob(s.replace(/\s/g, ""));
+  return new TextDecoder().decode(Uint8Array.from(r, c => c.charCodeAt(0)));
+}
+function slugify(t){
+  return t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+async function gh(path, opt = {}){
+  const c = cfg();
+  if(!c.token) throw new Error("Isi token GitHub di Pengaturan dulu.");
+  const r = await fetch(`https://api.github.com/repos/${c.owner}/${c.repo}/${path}`, {
+    ...opt,
+    headers: {
+      Authorization: "Bearer " + c.token,
+      Accept: "application/vnd.github+json",
+      "Content-Type": "application/json"
+    }
+  });
+  if(r.status === 404 && (!opt.method || opt.method === "GET")) return null;
+  if(!r.ok){
+    let m = r.status;
+    try { m = (await r.json()).message; } catch(e){}
+    throw new Error("GitHub: " + m);
+  }
+  return r.json();
+}
+
+function parsePost(text){
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  const meta = {}; let body = text;
+  if(m){
+    body = m[2].replace(/^\r?\n/, "");
+    m[1].split(/\r?\n/).forEach(l => {
+      const i = l.indexOf(":"); if(i < 0) return;
+      const k = l.slice(0, i).trim(); let v = l.slice(i + 1).trim();
+      try { v = JSON.parse(v); } catch(e){}
+      meta[k] = v;
+    });
+  }
+  return {meta, body};
+}
+function buildPost(title, date, body){
+  return `---\ntitle: ${JSON.stringify(title)}\ndate: ${date}\n---\n\n${body.trim()}\n`;
+}
+
+async function loadList(){
+  const ul = $("#list"); ul.innerHTML = "";
+  try {
+    const c = cfg();
+    const files = await gh(`contents/${c.dir}?ref=${encodeURIComponent(c.branch)}`);
+    const posts = (files || []).filter(f => f.name.endsWith(".md")).sort((a, b) => b.name.localeCompare(a.name));
+    if(!posts.length){
+      ul.innerHTML = '<li class="empty">Belum ada artikel. Tekan "Artikel baru" untuk mulai menulis.</li>';
+      return;
+    }
+    posts.forEach(f => {
+      const li = document.createElement("li");
+      const s = document.createElement("span"); s.textContent = f.name;
+      const b = document.createElement("button"); b.textContent = "Edit";
+      b.onclick = () => openPost(f.path);
+      li.append(s, b); ul.append(li);
+    });
+    say("");
+  } catch(e){ say(e.message, "err"); }
+}
+
+function showEditor(show){ $("#editor").hidden = !show; if(show) $("#editor").scrollIntoView(); }
+
+function newPost(){
+  cur = null;
+  $("#edTitle").textContent = "Artikel baru";
+  $("#title").value = ""; $("#body").value = ""; $("#slug").value = "";
+  $("#slug").disabled = false;
+  $("#date").value = new Date().toISOString().slice(0, 10);
+  $("#remove").hidden = true;
+  showEditor(true);
+}
+
+async function openPost(path){
+  try {
+    say("Membuka artikel...");
+    const f = await gh(`contents/${path}?ref=${encodeURIComponent(cfg().branch)}`);
+    if(!f) throw new Error("Artikel tidak ditemukan.");
+    const {meta, body} = parsePost(b64dec(f.content));
+    cur = {path: f.path, sha: f.sha};
+    $("#edTitle").textContent = "Edit artikel";
+    $("#title").value = meta.title || "";
+    $("#date").value = meta.date || "";
+    $("#slug").value = f.name; $("#slug").disabled = true;
+    $("#body").value = body;
+    $("#remove").hidden = false;
+    showEditor(true); say("");
+  } catch(e){ say(e.message, "err"); }
+}
+
+async function publish(){
+  const title = $("#title").value.trim(), date = $("#date").value, body = $("#body").value;
+  if(!title) return say("Judul tidak boleh kosong.", "err");
+  if(!date) return say("Pilih tanggal artikel.", "err");
+  const c = cfg();
+  let path;
+  if(cur) path = cur.path;
+  else {
+    const slug = slugify($("#slug").value || title);
+    if(!slug) return say("Slug tidak valid. Isi dengan huruf atau angka.", "err");
+    path = `${c.dir}/${date}-${slug}.md`;
+  }
+  const btn = $("#publish"); btn.disabled = true; say("Mengirim ke GitHub...");
+  try {
+    const payload = {
+      message: (cur ? "Edit artikel: " : "Artikel baru: ") + title,
+      content: b64enc(buildPost(title, date, body)),
+      branch: c.branch
+    };
+    if(cur) payload.sha = cur.sha;
+    await gh(`contents/${path}`, {method: "PUT", body: JSON.stringify(payload)});
+    say("Published.", "ok"); showEditor(false); cur = null; loadList();
+  } catch(e){ say(e.message, "err"); }
+  btn.disabled = false;
+}
+
+async function removePost(){
+  if(!cur || !confirm("Hapus artikel ini dari GitHub?")) return;
+  try {
+    await gh(`contents/${cur.path}`, {method: "DELETE", body: JSON.stringify({
+      message: "Hapus artikel: " + cur.path, sha: cur.sha, branch: cfg().branch
+    })});
+    say("Dihapus.", "ok"); showEditor(false); cur = null; loadList();
+  } catch(e){ say(e.message, "err"); }
+}
+
+function fillCfg(){ const c = cfg(); KEYS.forEach(k => $("#" + k).value = c[k]); }
+function saveCfg(){
+  const c = {}; KEYS.forEach(k => c[k] = $("#" + k).value.trim());
+  c.dir = c.dir.replace(/^\/+|\/+$/g, "");
+  try { localStorage.setItem("cms-cfg", JSON.stringify(c)); } catch(e){ return say("Browser tidak bisa menyimpan pengaturan.", "err"); }
+  say("Pengaturan disimpan.", "ok"); $("#setup").open = false; loadList();
+}
+
+$("#saveCfg").onclick = saveCfg;
+$("#reload").onclick = loadList;
+$("#newPost").onclick = newPost;
+$("#cancel").onclick = () => { showEditor(false); cur = null; };
+$("#publish").onclick = publish;
+$("#remove").onclick = removePost;
+$("#title").oninput = () => { if(!cur && !$("#slug").dataset.touched) $("#slug").value = slugify($("#title").value); };
+$("#slug").oninput = () => { $("#slug").dataset.touched = "1"; };
+
+fillCfg();
+if(cfg().token) loadList(); else { $("#setup").open = true; say("Isi token GitHub untuk mulai."); }
+</script>
+</body>
+  </html>
+  
